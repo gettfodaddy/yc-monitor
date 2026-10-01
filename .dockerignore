@@ -1,0 +1,6 @@
+.env
+secrets/
+data/
+node_modules/
+.git/
+README.md

@@ -1,0 +1,19 @@
+{
+  "refreshIntervalSeconds": 60,
+  "grantAmountRub": 4000,
+  "grantDurationDays": 60,
+  "accounts": [
+    {
+      "name": "Production account",
+      "billingAccountId": "<billing-account-id>",
+      "grantStartDate": "YYYY-MM-DD",
+      "serviceAccountKeyFile": "/run/secrets/yc-production-key.json",
+      "folders": [
+        {
+          "folderId": "<folder-id>",
+          "cloudId": "<cloud-id>"
+        }
+      ]
+    }
+  ]
+}

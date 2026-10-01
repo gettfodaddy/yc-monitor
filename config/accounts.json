@@ -1,0 +1,19 @@
+{
+  "refreshIntervalSeconds": 60,
+  "grantAmountRub": 4000,
+  "grantDurationDays": 60,
+  "accounts": [
+    {
+      "name": "cloud-boreas-209",
+      "billingAccountId": "dn2ffiykwxqiedmeeqy7",
+      "grantStartDate": "2026-09-03",
+      "serviceAccountKeyFile": "/run/secrets/yc-cloud-boreas-209-key.json",
+      "folders": [
+        {
+          "folderId": "b1godj0uuqq00na7uodt",
+          "cloudId": "b1g1rqaoglbr342d66sj"
+        }
+      ]
+    }
+  ]
+}

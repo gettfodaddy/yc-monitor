@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f7fb">
+  <title>Yandex Cloud · Монитор аккаунтов</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#"><span class="brand-mark">yc</span><span>cloud<span class="brand-light">watch</span></span></a>
+      <div class="workspace-label">МОНИТОРИНГ</div>
+      <a class="nav-item active" href="#accounts"><span class="nav-icon">▦</span> Аккаунты <span class="nav-count" id="nav-count">—</span></a>
+      <a class="nav-item" href="#cdn"><span class="nav-icon">◉</span> CDN-ресурсы</a>
+      <div class="sidebar-bottom"><div class="avatar">И</div><div><strong>Иван</strong><small>Администратор</small></div><span class="dots">···</span></div>
+    </aside>
+
+    <main class="main" id="accounts">
+      <header class="topbar"><div class="breadcrumbs">Обзор <span>/</span> Аккаунты</div><div class="top-actions"><span class="demo-pill" id="connection-state"><i></i> ПОДКЛЮЧЕНИЕ</span><button class="icon-button" aria-label="Уведомления">♧<b></b></button></div></header>
+
+      <section class="page-heading">
+        <div><div class="eyebrow">СРЕДА МОНИТОРИНГА</div><h1>Аккаунты</h1><p>Состояние стартовых грантов и трафика CDN</p></div>
+        <button class="refresh-button" id="refresh"><span class="refresh-icon">↻</span> Обновить данные</button>
+      </section>
+
+      <section class="summary-grid" aria-label="Сводка">
+        <article class="summary-card"><div class="summary-top"><span>Всего аккаунтов</span><span class="summary-icon purple">▦</span></div><strong id="summary-accounts">—</strong><small id="summary-accounts-note">Ожидание данных</small></article>
+        <article class="summary-card"><div class="summary-top"><span>Активные CDN</span><span class="summary-icon blue">◉</span></div><strong id="summary-cdn">—</strong><small>Во всех аккаунтах</small></article>
+        <article class="summary-card"><div class="summary-top"><span>Израсходовано грантов</span><span class="summary-icon orange">₽</span></div><strong id="summary-spent">—</strong><small id="summary-spent-note">из доступной суммы</small></article>
+        <article class="summary-card"><div class="summary-top"><span>Остаток грантов</span><span class="summary-icon mint">⌁</span></div><strong id="summary-remaining">—</strong><small>По отчётам биллинга</small></article>
+      </section>
+
+      <section class="table-card">
+        <div class="table-heading"><div><h2>Ваши аккаунты</h2><p>Данные с начала действия стартового гранта</p></div><div class="table-tools"><label class="search"><span>⌕</span><input id="search" type="search" placeholder="Поиск аккаунта"></label><button class="filter-button">☷ <span>Фильтр</span></button></div></div>
+        <div class="table-scroll"><table><thead><tr><th>АККАУНТ</th><th>CDN-РЕСУРСЫ</th><th>ТРАФИК С НАЧАЛА ГРАНТА</th><th>ИСПОЛЬЗОВАНО</th><th>ОСТАТОК ГРАНТА</th><th>ДО ОКОНЧАНИЯ</th><th></th></tr></thead><tbody id="account-rows"></tbody></table></div>
+        <div class="table-foot"><span id="showing">Показано 5 из 5 аккаунтов</span><span>Грант на аккаунт <b>4 000 ₽ · 60 дней</b></span></div>
+      </section>
+      <footer class="footer"><span><i class="status-dot green"></i> Последнее обновление <b id="updated">только что</b></span><span>Автообновление · 1 мин</span></footer>
+      <div class="demo-note" id="notice">Данные загружаются с сервера Yandex Cloud.</div>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
