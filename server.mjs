@@ -150,24 +150,27 @@ async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInt
 async function syncFolderTraffic(account,folderId,resources) {
   snapshot.trafficStates ||= {};
   const now=Date.now(),grantStart=Date.parse(`${account.grantStartDate}T00:00:00Z`);
-  for(const resource of resources){const state=snapshot.trafficStates[`${account.billingAccountId}:${resource.id}`];if(state&&state.measurementVersion!==2){state.initialized=false;state.availableMetrics={};state.measurementVersion=2;state.noDataBackfillAt=0;}if(state?.totalBytes===0&&!state.lastPoints?.['edge.bytes_sent']&&!state.lastPoints?.['origin.bytes_fetched']&&now-(state.noDataBackfillAt||0)>=15*60*1000){state.initialized=false;state.availableMetrics={};state.noDataBackfillAt=now;}}
+  for(const resource of resources){const state=snapshot.trafficStates[`${account.billingAccountId}:${resource.id}`];if(state&&state.measurementVersion!==3){state.initialized=false;state.edgeBytes=0;state.originBytes=0;state.totalBytes=0;state.lastPoints={};state.availableMetrics={};state.measurementVersion=3;state.noDataBackfillAt=0;}if(state?.totalBytes===0&&!state.lastPoints?.['edge.bytes_sent']&&!state.lastPoints?.['origin.bytes_fetched']&&now-(state.noDataBackfillAt||0)>=15*60*1000){state.initialized=false;state.availableMetrics={};state.noDataBackfillAt=now;}}
   const states=resources.map(r=>snapshot.trafficStates[`${account.billingAccountId}:${r.id}`]);
   const needsBackfill=states.some(s=>!s?.initialized);
   const checked=states.filter(s=>s?.initialized).map(s=>Math.max((s.lastCheckedAt||now)-10*60*1000,(Math.max(s.lastPoints?.['edge.bytes_sent']?.t||0,s.lastPoints?.['origin.bytes_fetched']?.t||0))-3*60*1000));
   const fromMs=needsBackfill?grantStart:Math.max(grantStart,Math.min(...checked,now-10*60*1000));
-  const periodMs=Math.max(1,now-fromMs),gridInterval=needsBackfill?Math.max(3*60*1000,Math.ceil(periodMs/6000/60000)*60000):3*60*1000;
+  // Keep the historical read below Monitoring's 10,000-point request ceiling.
+  const periodMs=Math.max(1,now-fromMs),gridInterval=needsBackfill?Math.max(3*60*1000,Math.ceil(periodMs/3500/60000)*60000):3*60*1000;
   const read=await readFolderTraffic(account,folderId,fromMs,now,resources,gridInterval),byId=new Map(read.resources.map(m=>[m.id,m]));
   const synced=resources.map(resource=>{
     const key=`${account.billingAccountId}:${resource.id}`,state=snapshot.trafficStates[key]||{edgeBytes:0,originBytes:0,initialized:false,lastPoints:{},availableMetrics:{}};
     state.edgeBytes??=state.totalBytes||0;state.originBytes??=0;state.lastPoints||={};state.availableMetrics||={};
-    state.measurementVersion=2;
+    state.measurementVersion=3;
     if(state.lastPoint&&!state.lastPoints['edge.bytes_sent'])state.lastPoints['edge.bytes_sent']=state.lastPoint;
     const measured=byId.get(resource.id);
     for(const metric of ['edge.bytes_sent','origin.bytes_fetched']){const points=measured?.metrics?.[metric]||[],baseline=state.lastPoints[metric]||null;if(points.length){const added=integratePoints(points.filter(p=>!baseline||p.t>baseline.t),baseline,measured.maxGapMs);state[metric==='edge.bytes_sent'?'edgeBytes':'originBytes']+=added.bytes;state.lastPoints[metric]=added.lastPoint;}if(measured?.metricAvailable?.[metric])state.availableMetrics[metric]=true;}
     if(state.totalBytes===0&&!state.lastPoints['edge.bytes_sent']&&!state.lastPoints['origin.bytes_fetched']&&!state.noDataBackfillAt)state.noDataBackfillAt=now;
-    state.totalBytes=state.edgeBytes+state.originBytes;state.available=['edge.bytes_sent','origin.bytes_fetched'].every(metric=>state.availableMetrics[metric]===true);
+    // User-facing CDN traffic is bytes delivered to clients. Origin fetches are
+    // a separate subset/operational measure and must not be added to delivery.
+    state.totalBytes=state.edgeBytes;state.available=state.availableMetrics['edge.bytes_sent']===true;
     state.initialized=true;state.lastCheckedAt=now;snapshot.trafficStates[key]=state;
-    return {...resource,trafficBytes:state.totalBytes,edgeBytes:state.edgeBytes,originBytes:state.originBytes,trafficAvailable:state.available};
+    return {...resource,trafficBytes:state.totalBytes,edgeBytes:state.edgeBytes,originBytes:state.originBytes,trafficAvailable:state.available,edgeTrafficAvailable:state.availableMetrics['edge.bytes_sent']===true,originTrafficAvailable:state.availableMetrics['origin.bytes_fetched']===true};
   });
   return {resources:synced,diagnostics:read.diagnostics,returnedNames:read.returnedNames,fallbackErrors:read.fallbackErrors};
 }
@@ -226,7 +229,7 @@ async function syncCdn(account, current) {
     } catch(error) { current.metricError=error.message; }
   }
   current.cdnResources=all;
-  current.trafficBytes=all.reduce((sum,r)=>sum+r.trafficBytes,0);
+  current.trafficBytes=all.reduce((sum,r)=>sum+r.edgeBytes,0);
 }
 
 function spawnBillingReport(account) {
