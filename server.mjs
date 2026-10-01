@@ -107,21 +107,22 @@ function integratePoints(points,baseline,maxGapMs) {
 }
 
 async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInterval) {
-  const result = await ycFetch(account, `https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`, {
-    method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({
-      query:'name="edge.bytes_sent|origin.bytes_fetched"{service="yccdn",resource="*"}', fromTime:new Date(fromMs).toISOString(), toTime:new Date(endMs).toISOString(),
+  const readMetric=metric=>ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`,{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
+      query:`"${metric}"{service="yccdn",resource="*"}`,fromTime:new Date(fromMs).toISOString(),toTime:new Date(endMs).toISOString(),
       downsampling:{gridInterval:String(gridInterval),gridAggregation:'AVG',gapFilling:'NULL'}
     })
   });
+  const results=await Promise.all(['edge.bytes_sent','origin.bytes_fetched'].map(async metric=>({metric,result:await readMetric(metric)})));
   const grouped=new Map();
-  for(const series of result.metrics||[]){
-    const id=series.labels?.resource,metric=series.name||series.labels?.name;if(!id||!['edge.bytes_sent','origin.bytes_fetched'].includes(metric))continue;
+  for(const {metric,result} of results){for(const series of result.metrics||[]){
+    const id=series.labels?.resource;if(!id)continue;
     let byMetric=grouped.get(id);if(!byMetric){byMetric=new Map();grouped.set(id,byMetric);}
     let times=byMetric.get(metric);if(!times){times=new Map();byMetric.set(metric,times);}
     for(const point of metricPoints(series,fromMs,endMs))times.set(point.t,(times.get(point.t)||0)+point.v);
-  }
+  }}
   const maxGapMs=Math.max(10*60*1000,gridInterval*2);
-  return resources.map(resource=>({id:resource.id,metrics:Object.fromEntries(['edge.bytes_sent','origin.bytes_fetched'].map(metric=>[metric,[...((grouped.get(resource.id)||new Map()).get(metric)||new Map())].map(([t,v])=>({t,v})).sort((a,b)=>a.t-b.t)])),maxGapMs}));
+  return resources.map(resource=>({id:resource.id,metrics:Object.fromEntries(['edge.bytes_sent','origin.bytes_fetched'].map(metric=>[metric,[...((grouped.get(resource.id)||new Map()).get(metric)||new Map())].map(([t,v])=>({t,v})).sort((a,b)=>a.t-b.t)])),queriedMetrics:results.map(x=>x.metric),maxGapMs}));
 }
 
 /* Usage is accumulated in the cache so historical traffic remains available
@@ -140,8 +141,8 @@ async function syncFolderTraffic(account,folderId,resources) {
     state.edgeBytes??=state.totalBytes||0;state.originBytes??=0;state.lastPoints||={};state.availableMetrics||={};
     if(state.lastPoint&&!state.lastPoints['edge.bytes_sent'])state.lastPoints['edge.bytes_sent']=state.lastPoint;
     const measured=byId.get(resource.id);
-    for(const metric of ['edge.bytes_sent','origin.bytes_fetched']){const points=measured?.metrics?.[metric]||[],baseline=state.lastPoints[metric]||null;if(points.length){const added=integratePoints(points.filter(p=>!baseline||p.t>baseline.t),baseline,measured.maxGapMs);state[metric==='edge.bytes_sent'?'edgeBytes':'originBytes']+=added.bytes;state.lastPoints[metric]=added.lastPoint;state.availableMetrics[metric]=true;}}
-    state.totalBytes=state.edgeBytes+state.originBytes;state.available=Object.values(state.availableMetrics).some(Boolean);
+    for(const metric of ['edge.bytes_sent','origin.bytes_fetched']){const points=measured?.metrics?.[metric]||[],baseline=state.lastPoints[metric]||null;if(points.length){const added=integratePoints(points.filter(p=>!baseline||p.t>baseline.t),baseline,measured.maxGapMs);state[metric==='edge.bytes_sent'?'edgeBytes':'originBytes']+=added.bytes;state.lastPoints[metric]=added.lastPoint;}if(measured?.queriedMetrics?.includes(metric))state.availableMetrics[metric]=true;}
+    state.totalBytes=state.edgeBytes+state.originBytes;state.available=['edge.bytes_sent','origin.bytes_fetched'].every(metric=>state.availableMetrics[metric]===true);
     state.initialized=true;state.lastCheckedAt=now;snapshot.trafficStates[key]=state;
     return {...resource,trafficBytes:state.totalBytes,edgeBytes:state.edgeBytes,originBytes:state.originBytes,trafficAvailable:state.available};
   });

@@ -23,7 +23,7 @@
     </aside>
 
     <main class="main" id="accounts">
-      <header class="topbar"><div class="breadcrumbs">Обзор <span>/</span> <span id="breadcrumb-page">Аккаунты</span></div><div class="top-actions"><span class="demo-pill" id="connection-state"><i></i> ПОДКЛЮЧЕНИЕ</span></div></header>
+      <header class="topbar"><div class="breadcrumbs">Обзор <span>/</span> <span id="breadcrumb-page">Аккаунты</span></div><div class="top-actions"><span class="demo-pill" id="connection-state"><i></i> ПОДКЛЮЧЕНИЕ</span><button type="button" class="theme-toggle" id="theme-toggle" aria-label="Переключить цветовую тему" title="Переключить цветовую тему"><span id="theme-icon">☾</span><span id="theme-label">Тёмная тема</span></button></div></header>
 
       <section class="page-heading">
         <div><div class="eyebrow">СРЕДА МОНИТОРИНГА</div><h1 id="page-title">Аккаунты</h1><p id="page-description">Состояние стартовых грантов и трафика CDN</p></div>
@@ -31,10 +31,10 @@
       </section>
 
       <section class="summary-grid" aria-label="Сводка">
-        <article class="summary-card"><div class="summary-top"><span>Всего аккаунтов</span><span class="summary-icon purple">▦</span></div><strong id="summary-accounts">—</strong><small id="summary-accounts-note">Ожидание данных</small></article>
-        <article class="summary-card"><div class="summary-top"><span>Активные CDN</span><span class="summary-icon blue">◉</span></div><strong id="summary-cdn">—</strong><small>Во всех аккаунтах</small></article>
-        <article class="summary-card"><div class="summary-top"><span>Израсходовано грантов</span><span class="summary-icon orange">₽</span></div><strong id="summary-spent">—</strong><small id="summary-spent-note">из доступной суммы</small></article>
-        <article class="summary-card"><div class="summary-top"><span>Остаток грантов</span><span class="summary-icon mint">⌁</span></div><strong id="summary-remaining">—</strong><small>По отчётам биллинга</small></article>
+        <article class="summary-card summary-clickable" id="summary-accounts-card" role="button" tabindex="0" aria-label="Показать все аккаунты"><div class="summary-top"><span>Всего аккаунтов</span><span class="summary-icon purple">▦</span></div><strong id="summary-accounts">—</strong><small id="summary-accounts-note">Ожидание данных</small></article>
+        <article class="summary-card summary-clickable" id="summary-cdn-card" role="button" tabindex="0" aria-label="Показать активные CDN"><div class="summary-top"><span>Активные CDN</span><span class="summary-icon blue">◉</span></div><strong id="summary-cdn">—</strong><small>Во всех аккаунтах</small></article>
+        <article class="summary-card summary-clickable" id="summary-spent-card" role="button" tabindex="0" aria-label="Детализация использованных грантов"><div class="summary-top"><span>Израсходовано грантов</span><span class="summary-icon orange">₽</span></div><strong id="summary-spent">—</strong><small id="summary-spent-note">из доступной суммы</small></article>
+        <article class="summary-card summary-clickable" id="summary-remaining-card" role="button" tabindex="0" aria-label="Детализация остатка грантов"><div class="summary-top"><span>Остаток грантов</span><span class="summary-icon mint">⌁</span></div><strong id="summary-remaining">—</strong><small>По отчётам биллинга</small></article>
       </section>
 
       <section class="table-card">
@@ -48,6 +48,7 @@
   </div>
   <dialog id="account-dialog" class="account-dialog"><form id="account-form"><div class="dialog-heading"><div><h2 id="dialog-title">Добавить аккаунт</h2><p>Ключ хранится на сервере и не показывается в интерфейсе.</p></div><button type="button" class="dialog-close" id="dialog-close" aria-label="Закрыть">×</button></div><label>Название аккаунта<input name="name" required placeholder="Например, cloud-boreas-209"></label><label>Billing account ID<input name="billingAccountId" required placeholder="dn2ffiykwxqiedmeeqy7"></label><label>Дата начала гранта<input name="grantStartDate" required type="date"><small>Грант: 4 000 ₽ на 60 дней с этой даты.</small></label><label>Cloud ID и Folder ID<textarea name="folders" required rows="3" placeholder="Вставьте по одной паре на строку: cloud-id,folder-id"></textarea><small>В консоли Yandex Cloud скопируйте ID облака и каталога, разделите запятой. Можно указать несколько каталогов.</small></label><label>JSON-ключ сервисного аккаунта<input name="keyFile" type="file" accept=".json,application/json"><small id="key-hint">Нужен файл ключа сервисного аккаунта (id, service_account_id, private_key).</small></label><div class="form-error" id="form-error"></div><div class="dialog-actions"><button type="button" class="filter-button" id="dialog-cancel">Отмена</button><button type="submit" class="refresh-button">Сохранить аккаунт</button></div></form></dialog>
   <dialog id="detail-dialog" class="account-dialog detail-dialog"><div class="detail-content"><div class="dialog-heading"><div><div class="eyebrow">АККАУНТ YANDEX CLOUD</div><h2 id="detail-title">Подробности</h2><p id="detail-id"></p></div><button type="button" class="dialog-close" id="detail-close" aria-label="Закрыть">×</button></div><div class="detail-stats" id="detail-stats"></div><h3>CDN-ресурсы</h3><div id="detail-cdn" class="detail-cdn"></div><p id="detail-errors" class="form-error"></p><div class="dialog-actions"><button type="button" class="filter-button" id="detail-dismiss">Закрыть</button><button type="button" class="refresh-button" id="detail-edit">Изменить аккаунт</button></div></div></dialog>
+  <dialog id="overview-dialog" class="account-dialog overview-dialog"><div class="detail-content"><div class="dialog-heading"><div><div class="eyebrow">СВОДКА МОНИТОРИНГА</div><h2 id="overview-title">Подробности</h2><p id="overview-description"></p></div><button type="button" class="dialog-close" id="overview-close" aria-label="Закрыть">×</button></div><div id="overview-content" class="overview-content"></div></div></dialog>
   <script src="app.js"></script>
 </body>
 </html>
