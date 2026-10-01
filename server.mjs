@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { readFile, writeFile, mkdir, rename, chmod } from 'node:fs/promises';
-import { constants, createSign, timingSafeEqual } from 'node:crypto';
+import { constants, createSign, timingSafeEqual, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,22 +17,28 @@ const MIME = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8
 let config;
 let snapshot = { accounts: [], trafficStates: {}, lastUpdated: null, lastError: null, refreshRunning: false, nextBillingRefreshAt: null };
 const tokenCache = new Map();
+const sessions = new Map();
+const loginAttempts = new Map();
 const encoder = value => Buffer.from(value).toString('base64url');
 
-function basicAuthOk(req) {
-  if (!BASIC_USER && !BASIC_PASSWORD) return true;
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Basic ')) return false;
-  let decoded;
-  try { decoded = Buffer.from(header.slice(6), 'base64').toString(); } catch { return false; }
-  const split = decoded.indexOf(':');
-  if (split < 0) return false;
-  const user = Buffer.from(decoded.slice(0, split));
-  const pass = Buffer.from(decoded.slice(split + 1));
-  const expectedUser = Buffer.from(BASIC_USER);
-  const expectedPass = Buffer.from(BASIC_PASSWORD);
-  return user.length === expectedUser.length && pass.length === expectedPass.length &&
-    timingSafeEqual(user, expectedUser) && timingSafeEqual(pass, expectedPass);
+function safeEqual(value, expected) {
+  const left=Buffer.from(String(value||'')),right=Buffer.from(String(expected||''));
+  return left.length===right.length&&timingSafeEqual(left,right);
+}
+function sessionToken(req) {
+  const cookie=req.headers.cookie||'';
+  const match=cookie.match(/(?:^|;\s*)yc_monitor_session=([^;]+)/);
+  return match?.[1]||'';
+}
+function sessionOk(req) {
+  const token=sessionToken(req),expires=sessions.get(token);
+  if(!token||!expires)return false;
+  if(expires<Date.now()){sessions.delete(token);return false;}
+  return true;
+}
+function sessionCookie(req,token,maxAge=43200) {
+  const secure=req.headers['x-forwarded-proto']==='https'||req.socket.encrypted;
+  return `yc_monitor_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${secure?'; Secure':''}`;
 }
 
 function json(res, status, data) {
@@ -333,10 +339,23 @@ async function load() {
 const server=http.createServer(async(req,res)=>{
   const url=new URL(req.url,'http://localhost');
   if (url.pathname==='/healthz') return json(res,200,{ok:true});
-  if (!basicAuthOk(req)) { res.writeHead(401,{'www-authenticate':'Basic realm="YC Monitor"','cache-control':'no-store'}); return res.end('Authentication required'); }
+  if(url.pathname==='/api/login'&&req.method==='POST'){
+    const ip=req.socket.remoteAddress||'unknown',now=Date.now(),attempt=loginAttempts.get(ip)||{startedAt:now,count:0};if(now-attempt.startedAt>10*60*1000){attempt.startedAt=now;attempt.count=0;}if(attempt.count>=10)return json(res,429,{error:'Слишком много попыток. Подождите 10 минут и попробуйте снова.'});attempt.count++;loginAttempts.set(ip,attempt);
+    try{const body=await readBody(req,4096);if(!safeEqual(body.username,BASIC_USER)||!safeEqual(body.password,BASIC_PASSWORD))return json(res,401,{error:'Неверный логин или пароль.'});loginAttempts.delete(ip);for(const [key,expires] of sessions)if(expires<now)sessions.delete(key);const token=randomBytes(32).toString('base64url');sessions.set(token,Date.now()+12*60*60*1000);res.setHeader('set-cookie',sessionCookie(req,token));return json(res,200,{ok:true});}
+    catch{return json(res,400,{error:'Не удалось выполнить вход.'});}
+  }
+  if(url.pathname==='/api/logout'&&req.method==='POST'){sessions.delete(sessionToken(req));res.setHeader('set-cookie',sessionCookie(req,'',0));return json(res,200,{ok:true});}
+  if(url.pathname==='/login'){
+    try{const data=await readFile(path.join(ROOT,'login.html'));res.writeHead(200,{'content-type':MIME['.html'],'cache-control':'no-store'});return res.end(data);}
+    catch{return json(res,404,{error:'Not found'});}
+  }
+  if (!sessionOk(req)) {
+    if(req.method==='GET'&&['/','/index.html','/accounts','/cdn'].includes(url.pathname)){res.writeHead(302,{location:`/login?next=${encodeURIComponent(url.pathname)}`,'cache-control':'no-store'});return res.end();}
+    return json(res,401,{error:'Требуется вход в панель.'});
+  }
   if (url.pathname==='/api/dashboard' && req.method==='GET') {
     const { _lastBillingRequestAt, _billingCursor, trafficStates, ...publicSnapshot }=snapshot;
-    return json(res,200,{...publicSnapshot,accounts:snapshot.accounts.map(a=>({...a,daysLeft:Math.max(0,a.daysLeft||0),folders:config.accounts.find(c=>c.billingAccountId===a.billingAccountId)?.folders||[]}))});
+    return json(res,200,{...publicSnapshot,profile:{name:'Иван',role:'Администратор'},accounts:snapshot.accounts.map(a=>({...a,daysLeft:Math.max(0,a.daysLeft||0),folders:config.accounts.find(c=>c.billingAccountId===a.billingAccountId)?.folders||[]}))});
   }
   if (url.pathname==='/api/refresh' && req.method==='POST') {
     refresh({manual:true});
