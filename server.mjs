@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rename, chmod } from 'node:fs/promises';
 import { constants, createSign, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = process.env.ACCOUNTS_CONFIG || path.join(ROOT, 'config/accounts.json');
+const MANAGED_CONFIG_PATH = process.env.MANAGED_CONFIG_PATH || path.join(ROOT, 'data/accounts.json');
 const CACHE_PATH = process.env.CACHE_PATH || path.join(ROOT, 'data/cache.json');
 const PORT = Number(process.env.PORT || 3000);
 const BASIC_USER = process.env.DASHBOARD_USER || '';
@@ -107,11 +108,13 @@ function integrateSeries(series, startMs, endMs) {
 
 async function readFolderTraffic(account, folderId, startDate, resources) {
   const startMs=Date.parse(`${startDate}T00:00:00Z`), endMs=Date.now();
+  const periodMs=Math.max(1,endMs-startMs);
+  const gridInterval=Math.max(15*60*1000,Math.ceil(periodMs/8000/60000)*60000);
   const query = '"edge.bytes_sent"{resource="*"}';
   const result = await ycFetch(account, `https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`, {
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({
       query, fromTime:new Date(startMs).toISOString(), toTime:new Date(endMs).toISOString(),
-      downsampling:{maxPoints:'10000',gridAggregation:'AVG',gapFilling:'NULL'}
+      downsampling:{gridInterval:String(gridInterval),gridAggregation:'AVG',gapFilling:'NULL'}
     })
   });
   const byResource = new Map();
@@ -140,7 +143,10 @@ async function grantSpent(account) {
   const request={billing_account_id:account.billingAccountId,start_date:`${account.grantStartDate}T00:00:00Z`,end_date:now.toISOString(),aggregation_period:'DAY'};
   const raw=await grpcJson(['-H',`authorization: Bearer ${token}`,'-d',JSON.stringify(request),'billing.api.cloud.yandex.net:443','yandex.cloud.billing.usage_records.v1.ConsumptionCoreService/GetBillingAccountUsageReport']);
   const report=JSON.parse(raw);
-  const value=Number(report.credit_details?.monetary_grant_credit?.value || 0);
+  const details=report.credit_details ?? report.creditDetails ?? {};
+  const credit=details.monetary_grant_credit ?? details.monetaryGrantCredit ?? {};
+  const money=credit.value ?? credit;
+  const value=typeof money==='object' ? Number(money.units||0)+Number(money.nanos||0)/1e9 : Number(money||0);
   return Math.abs(value);
 }
 
@@ -155,11 +161,18 @@ function initialAccount(account) {
 }
 
 async function syncCdn(account, current) {
+  current.metricError=null;
   const all=[];
   for (const folder of account.folders || []) {
     const resources=await listCdnResources(account,folder.folderId);
-    const withTraffic=await readFolderTraffic(account,folder.folderId,account.grantStartDate,resources);
-    all.push(...withTraffic.map(r=>({id:r.id,name:r.cname||r.id,folderId:folder.folderId,active:r.active!==false,trafficBytes:r.trafficBytes||0})));
+    const folderItems=resources.map(r=>({id:r.id,name:r.cname||r.id,folderId:folder.folderId,active:r.active!==false,trafficBytes:current.cdnResources.find(old=>old.id===r.id)?.trafficBytes||0}));
+    all.push(...folderItems);
+    current.cdnResources=[...all];
+    try {
+      const withTraffic=await readFolderTraffic(account,folder.folderId,account.grantStartDate,resources);
+      const trafficById=new Map(withTraffic.map(r=>[r.id,r.trafficBytes||0]));
+      for (const item of folderItems) item.trafficBytes=trafficById.get(item.id)||0;
+    } catch(error) { current.metricError=error.message; }
   }
   current.cdnResources=all;
   current.trafficBytes=all.reduce((sum,r)=>sum+r.trafficBytes,0);
@@ -174,12 +187,49 @@ function spawnBillingReport(account) {
     item.grantSpentRub=Math.min(spent,grant);
     item.grantRemainingRub=Math.max(0,grant-spent);
     item.billingUpdatedAt=new Date().toISOString();
-    item.error=null;
+    item.billingError=null;
   }).catch(error=>{item.billingError=error.message;}).finally(()=>{item.billingLoading=false;persist();});
 }
 
 async function persist() {
   try { await mkdir(path.dirname(CACHE_PATH),{recursive:true}); await writeFile(CACHE_PATH,JSON.stringify(snapshot,null,2)); } catch (error) { console.error('Cache save failed:',error.message); }
+}
+
+async function persistConfig() {
+  await mkdir(path.dirname(MANAGED_CONFIG_PATH),{recursive:true});
+  const temp=`${MANAGED_CONFIG_PATH}.tmp`;
+  await writeFile(temp,JSON.stringify(config,null,2),{mode:0o600});
+  await rename(temp,MANAGED_CONFIG_PATH);
+  await chmod(MANAGED_CONFIG_PATH,0o600);
+}
+
+async function readBody(req, limit=2_000_000) {
+  let raw='';
+  for await (const chunk of req) { raw+=chunk; if(raw.length>limit) throw new Error('Request too large'); }
+  return JSON.parse(raw||'{}');
+}
+
+function validateAccount(input, existing=null) {
+  const name=String(input.name||'').trim();
+  const billingAccountId=String(input.billingAccountId||'').trim();
+  const grantStartDate=String(input.grantStartDate||'');
+  const folders=Array.isArray(input.folders)?input.folders:[];
+  if(!name || !/^[a-zA-Z0-9_-]{4,80}$/.test(billingAccountId) || !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(grantStartDate) || !Number.isFinite(Date.parse(`${grantStartDate}T00:00:00Z`))) throw new Error('Проверьте название, Billing ID и дату начала гранта.');
+  if(!folders.length || folders.some(f=>!/^[-a-zA-Z0-9]{5,80}$/.test(String(f.cloudId||'')) || !/^[-a-zA-Z0-9]{5,80}$/.test(String(f.folderId||'')))) throw new Error('Добавьте хотя бы одну пару Cloud ID и Folder ID.');
+  const serviceAccountKeyFile=existing?.serviceAccountKeyFile||'';
+  return {name,billingAccountId,grantStartDate,folders:folders.map(f=>({cloudId:String(f.cloudId),folderId:String(f.folderId)})),serviceAccountKeyFile};
+}
+
+async function storeKey(account, keyJson) {
+  if(!keyJson) return;
+  const key=typeof keyJson==='string'?JSON.parse(keyJson):keyJson;
+  if(!key?.id || !key?.service_account_id || !key?.private_key) throw new Error('JSON ключа должен содержать id, service_account_id и private_key.');
+  const dir=path.join(path.dirname(CACHE_PATH),'secrets');
+  await mkdir(dir,{recursive:true});
+  const target=path.join(dir,`${account.billingAccountId}.json`);
+  await writeFile(target,JSON.stringify(key,null,2),{mode:0o600});
+  await chmod(target,0o600);
+  account.serviceAccountKeyFile=target;
 }
 
 async function refresh({manual=false}={}) {
@@ -218,7 +268,8 @@ async function refresh({manual=false}={}) {
 }
 
 async function load() {
-  config=JSON.parse(await readFile(CONFIG_PATH,'utf8'));
+  try { config=JSON.parse(await readFile(MANAGED_CONFIG_PATH,'utf8')); }
+  catch { config=JSON.parse(await readFile(CONFIG_PATH,'utf8')); await persistConfig(); }
   if (!Array.isArray(config.accounts)) throw new Error('config.accounts must be an array');
   try { snapshot={...snapshot,...JSON.parse(await readFile(CACHE_PATH,'utf8'))}; } catch {}
   for (const account of config.accounts) if (!snapshot.accounts.some(x=>x.billingAccountId===account.billingAccountId)) snapshot.accounts.push(initialAccount(account));
@@ -231,13 +282,29 @@ const server=http.createServer(async(req,res)=>{
   if (!basicAuthOk(req)) { res.writeHead(401,{'www-authenticate':'Basic realm="YC Monitor"','cache-control':'no-store'}); return res.end('Authentication required'); }
   if (url.pathname==='/api/dashboard' && req.method==='GET') {
     const { _lastBillingRequestAt, _billingCursor, ...publicSnapshot }=snapshot;
-    return json(res,200,{...publicSnapshot,accounts:snapshot.accounts.map(a=>({...a,daysLeft:Math.max(0,a.daysLeft||0)}))});
+    return json(res,200,{...publicSnapshot,accounts:snapshot.accounts.map(a=>({...a,daysLeft:Math.max(0,a.daysLeft||0),folders:config.accounts.find(c=>c.billingAccountId===a.billingAccountId)?.folders||[]}))});
   }
   if (url.pathname==='/api/refresh' && req.method==='POST') {
     refresh({manual:true});
     return json(res,202,{accepted:true,message:'Обновление запущено; биллинговый отчёт обновляется по очереди с учётом лимита API.'});
   }
-  const publicFiles={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/app.js':'app.js'};
+  if (url.pathname==='/api/accounts' && req.method==='POST') {
+    try {
+      const body=await readBody(req); const account=validateAccount(body);
+      if(config.accounts.some(a=>a.billingAccountId===account.billingAccountId)) return json(res,409,{error:'Аккаунт с таким Billing ID уже существует.'});
+      await storeKey(account,body.keyJson); if(!account.serviceAccountKeyFile) return json(res,400,{error:'Загрузите JSON-ключ сервисного аккаунта.'});
+      config.accounts.push(account); await persistConfig(); snapshot.accounts.push(initialAccount(account)); refresh(); return json(res,201,{ok:true});
+    } catch(error) { return json(res,400,{error:error.message}); }
+  }
+  if (url.pathname.startsWith('/api/accounts/') && req.method==='PUT') {
+    try {
+      const id=decodeURIComponent(url.pathname.slice('/api/accounts/'.length)); const index=config.accounts.findIndex(a=>a.billingAccountId===id);
+      if(index<0) return json(res,404,{error:'Аккаунт не найден.'});
+      const body=await readBody(req); const account=validateAccount({...body,billingAccountId:id},config.accounts[index]);
+      await storeKey(account,body.keyJson); config.accounts[index]=account; await persistConfig(); refresh(); return json(res,200,{ok:true});
+    } catch(error) { return json(res,400,{error:error.message}); }
+  }
+  const publicFiles={'/':'index.html','/index.html':'index.html','/accounts':'index.html','/cdn':'index.html','/styles.css':'styles.css','/app.js':'app.js'};
   const file=publicFiles[url.pathname];
   if (file) {
     try { const data=await readFile(path.join(ROOT,file)); res.writeHead(200,{'content-type':MIME[path.extname(file)]||'application/octet-stream','cache-control':'no-store'}); return res.end(data); }
