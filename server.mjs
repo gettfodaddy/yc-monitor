@@ -107,9 +107,9 @@ function integratePoints(points,baseline,maxGapMs) {
 }
 
 async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInterval) {
-  const readMetric=(metric,resourceId='*')=>ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`,{
+  const readMetric=(metric,resourceId='*',mode='quoted')=>ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`,{
     method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      query:`"${metric}"{service="yccdn",resource="${resourceId}"}`,fromTime:new Date(fromMs).toISOString(),toTime:new Date(endMs).toISOString(),
+      query:mode==='selector'?`{name="${metric}",service="yccdn",resource="${resourceId}"}`:`"${metric}"{service="yccdn",resource="${resourceId}"}`,fromTime:new Date(fromMs).toISOString(),toTime:new Date(endMs).toISOString(),
       downsampling:{gridInterval:String(gridInterval),gridAggregation:'AVG',gapFilling:'NULL'}
     })
   });
@@ -125,11 +125,15 @@ async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInt
     return true;
   };
   for(const {metric,result} of results){const series=result.metrics||[];diagnostics[metric]={series:series.length,points:0,labels:series[0]?Object.keys(series[0].labels||{}):[]};for(const item of series){addSeries(metric,item);diagnostics[metric].points+=metricPoints(item,fromMs,endMs).length;}}
+  if(Object.values(diagnostics).every(item=>item.series===0)){
+    const selectors=await Promise.all(metricNames.map(async metric=>{try{return {metric,result:await readMetric(metric,'*','selector')}}catch(error){return {metric,error}}}));
+    for(const item of selectors){if(item.error){diagnostics[item.metric].selectorError=item.error.message;continue;}const series=item.result.metrics||[];diagnostics[item.metric].selectorSeries=series.length;for(const entry of series)addSeries(item.metric,entry);}
+  }
   // A wildcard query can return series with different label encodings. Retry by exact resource ID
   // so one missing label mapping cannot silently turn real CDN usage into 0 B.
   const missing=[];
   for(const resource of resources)for(const metric of metricNames){const points=(grouped.get(resource.id)?.get(metric)?.size||0);if(!points)missing.push({resource,metric});}
-  const fallback=await Promise.all(missing.map(async ({resource,metric})=>{try{return {resource,metric,result:await readMetric(metric,resource.id)};}catch(error){return {resource,metric,error};}}));
+  const fallback=await Promise.all(missing.map(async ({resource,metric})=>{try{let result=await readMetric(metric,resource.id,'selector');if(!(result.metrics||[]).length)result=await readMetric(metric,resource.id);return {resource,metric,result};}catch(error){return {resource,metric,error};}}));
   const fallbackErrors=[];
   for(const item of fallback){if(item.error){fallbackErrors.push(`${item.resource.name}: ${item.metric}: ${item.error.message}`);continue;}for(const series of item.result.metrics||[]){if(!addSeries(item.metric,series))addSeries(item.metric,{...series,labels:{...(series.labels||{}),resource:item.resource.id}});}}
   for(const metric of metricNames){const resourceSeries=new Set();let points=0;for(const resource of resources){const series=grouped.get(resource.id)?.get(metric);if(series?.size){resourceSeries.add(resource.id);points+=series.size;}}diagnostics[metric].matchedResources=resourceSeries.size;diagnostics[metric].matchedPoints=points;}
@@ -137,6 +141,8 @@ async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInt
   if(Object.values(diagnostics).every(item=>item.matchedPoints===0)){
     try{const query=new URLSearchParams({folderId,nameFilter:'bytes'});const metadata=await ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/metrics/names?${query}`);diagnostics.availableMetricNames=(metadata.names||[]).filter(name=>/cdn|edge\.bytes|origin\.bytes/i.test(name)).slice(0,30);}
     catch(error){diagnostics.metricDiscoveryError=error.message;}
+    try{const query=new URLSearchParams({folderId,selectors:'{service="yccdn"}',pageSize:'1000'});const metadata=await ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/metrics?${query}`);diagnostics.resourceLabels=(metadata.metrics||[]).filter(metric=>metricNames.includes(metric.name)).map(metric=>({name:metric.name,resource:metric.labels?.resource,folder_id:metric.labels?.folder_id,service:metric.labels?.service})).slice(0,30);}
+    catch(error){diagnostics.seriesDiscoveryError=error.message;}
   }
   const metricExists=Object.fromEntries(metricNames.map(metric=>[metric,diagnostics[metric].matchedResources>0]));
   const maxGapMs=Math.max(10*60*1000,gridInterval*2);
@@ -217,7 +223,7 @@ async function syncCdn(account, current) {
       const traffic=await syncFolderTraffic(account,folder.folderId,folderItems);
       const byId=new Map(traffic.resources.map(r=>[r.id,r]));
       current.metricDiagnostics=traffic.diagnostics;current.metricReturnedNames=traffic.returnedNames;
-      if(traffic.resources.some(r=>!r.trafficAvailable)){const edge=traffic.diagnostics['edge.bytes_sent'],origin=traffic.diagnostics['origin.bytes_fetched'],found=traffic.diagnostics.availableMetricNames||[];const warning=`Monitoring не отдал точки: edge.bytes_sent — ${edge.matchedResources} ресурсов/${edge.matchedPoints} точек, origin.bytes_fetched — ${origin.matchedResources} ресурсов/${origin.matchedPoints} точек; доступные имена: ${found.join(', ')||'не найдены'}`;current.metricWarning=[current.metricWarning,warning].filter(Boolean).join(' · ');}
+      if(traffic.resources.some(r=>!r.trafficAvailable)){const edge=traffic.diagnostics['edge.bytes_sent'],origin=traffic.diagnostics['origin.bytes_fetched'],found=traffic.diagnostics.availableMetricNames||[],labels=traffic.diagnostics.resourceLabels||[];const labelSummary=labels.map(item=>`${item.name} → ${item.resource||'без resource'}`).join(', ');const warning=`Monitoring не отдал точки: edge.bytes_sent — ${edge.matchedResources} ресурсов/${edge.matchedPoints} точек, origin.bytes_fetched — ${origin.matchedResources} ресурсов/${origin.matchedPoints} точек; имена: ${found.join(', ')||'не найдены'}; метки resource: ${labelSummary||'не получены'}`;current.metricWarning=[current.metricWarning,warning].filter(Boolean).join(' · ');}
       if(traffic.fallbackErrors.length)current.metricWarning=[current.metricWarning,`Ошибка чтения метрик по ID CDN: ${traffic.fallbackErrors.join(' · ')}`].filter(Boolean).join(' · ');
       for(const item of folderItems){const measured=byId.get(item.id);item.trafficBytes=measured.trafficBytes;item.edgeBytes=measured.edgeBytes;item.originBytes=measured.originBytes;item.trafficAvailable=measured.trafficAvailable;}
     } catch(error) { current.metricError=error.message; }
