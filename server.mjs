@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { createSign, timingSafeEqual } from 'node:crypto';
+import { constants, createSign, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,13 +50,14 @@ async function iamToken(account) {
   if (cached && cached.expiresAt > Date.now() + 60000) return cached.token;
   const key = await authorizedKey(account);
   const now = Math.floor(Date.now() / 1000);
-  const header = encoder(JSON.stringify({alg:'RS256',typ:'JWT',kid:key.id}));
+  const header = encoder(JSON.stringify({alg:'PS256',typ:'JWT',kid:key.id}));
   const payload = encoder(JSON.stringify({iss:key.service_account_id,sub:key.service_account_id,aud:'https://iam.api.cloud.yandex.net/iam/v1/tokens',iat:now,exp:now+3600}));
   const unsigned = `${header}.${payload}`;
-  const signer = createSign('RSA-SHA256');
+  const signer = createSign('sha256');
   signer.update(unsigned);
   signer.end();
-  const jwt = `${unsigned}.${signer.sign(key.private_key).toString('base64url')}`;
+  const signature = signer.sign({key:key.private_key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:constants.RSA_PSS_SALTLEN_DIGEST});
+  const jwt = `${unsigned}.${signature.toString('base64url')}`;
   const response = await fetch('https://iam.api.cloud.yandex.net/iam/v1/tokens', {
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({jwt}), signal:AbortSignal.timeout(30000)
   });
