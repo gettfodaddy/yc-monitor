@@ -349,6 +349,10 @@ const server=http.createServer(async(req,res)=>{
     try{const data=await readFile(path.join(ROOT,'login.html'));res.writeHead(200,{'content-type':MIME['.html'],'cache-control':'no-store'});return res.end(data);}
     catch{return json(res,404,{error:'Not found'});}
   }
+  if (url.pathname==='/logo.svg' || url.pathname==='/favicon.svg') {
+    try { const data=await readFile(path.join(ROOT,url.pathname.slice(1))); res.writeHead(200,{'content-type':MIME['.svg'],'cache-control':'public, max-age=3600'}); return res.end(data); }
+    catch { return json(res,404,{error:'Not found'}); }
+  }
   if (!sessionOk(req)) {
     if(req.method==='GET'&&['/','/index.html','/accounts','/cdn'].includes(url.pathname)){res.writeHead(302,{location:`/login?next=${encodeURIComponent(url.pathname)}`,'cache-control':'no-store'});return res.end();}
     return json(res,401,{error:'Требуется вход в панель.'});

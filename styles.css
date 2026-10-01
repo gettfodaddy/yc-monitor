@@ -62,9 +62,12 @@ a { color: inherit; }
 
 .app-shell { display: flex; min-height: 100vh; }
 .sidebar { position: sticky; top: 0; display: flex; flex: 0 0 232px; flex-direction: column; width: 232px; height: 100vh; padding: 25px 14px 16px; background: var(--surface); border-right: 1px solid var(--line); transition: background-color .25s ease, border-color .25s ease; }
-.brand { display: flex; align-items: center; gap: 10px; margin: 1px 0 48px 5px; color: var(--ink); text-decoration: none; font: 800 18px Manrope, sans-serif; letter-spacing: -.7px; }
-.brand-light { color: var(--muted); font-weight: 500; }
-.brand-mark { display: block; width: 34px; height: 34px; border-radius: 11px; object-fit: cover; }
+.brand { display: grid; grid-template-columns: 40px minmax(0,1fr); align-items: center; column-gap: 11px; min-height: 70px; margin: 1px 0 42px; padding: 12px; border: 1px solid #2c3a62; border-radius: 14px; background: #18213c; color: #fff; text-decoration: none; }
+.brand-copy { display: grid; gap: 2px; min-width: 0; line-height: 1.15; }
+.brand-title { color: #fff; font: 750 15px Manrope, sans-serif; letter-spacing: -.3px; white-space: nowrap; }
+.brand-title strong { color: #8fa4ff; font-weight: 800; }
+.brand-subtitle { color: #f4f6ff; font: 600 11px 'DM Sans', sans-serif; letter-spacing: .6px; }
+.brand-mark { display: block; grid-row: 1; width: 40px; height: 40px; border: 1px solid #40518a; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 13px #080d2038; }
 .workspace-label, .eyebrow { color: var(--accent-ink); font-size: 10px; font-weight: 700; letter-spacing: 1.15px; }
 .workspace-label { padding: 0 10px 12px; }
 .nav-item { display: flex; height: 42px; align-items: center; gap: 12px; margin: 2px 0; padding: 0 11px; border-radius: 9px; color: var(--muted); text-decoration: none; font-weight: 550; transition: background .18s ease, color .18s ease, transform .18s ease, box-shadow .18s ease; }
@@ -266,8 +269,8 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 @media (max-width: 760px) {
   .sidebar { flex-basis: 58px; width: 58px; padding: 20px 9px; }
-  .brand { justify-content: center; margin: 1px auto 45px; }
-  .brand > span:last-child, .workspace-label, .nav-item { font-size: 0; }
+  .brand { display: flex; width: 42px; min-height: 42px; justify-content: center; margin: 1px auto 45px; padding: 0; border-radius: 12px; }
+  .brand-copy, .workspace-label, .nav-item { display: none; }
   .nav-item { justify-content: center; padding: 0; }
   .nav-icon { font-size: 18px; }
   .nav-count { display: none; }
