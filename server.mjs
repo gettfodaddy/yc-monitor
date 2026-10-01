@@ -15,7 +15,7 @@ const BASIC_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 const MIME = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml'};
 
 let config;
-let snapshot = { accounts: [], lastUpdated: null, lastError: null, refreshRunning: false, nextBillingRefreshAt: null };
+let snapshot = { accounts: [], trafficStates: {}, lastUpdated: null, lastError: null, refreshRunning: false, nextBillingRefreshAt: null };
 const tokenCache = new Map();
 const encoder = value => Buffer.from(value).toString('base64url');
 
@@ -92,39 +92,60 @@ async function listCdnResources(account, folderId) {
   return all;
 }
 
-function integrateSeries(series, startMs, endMs) {
-  const ts = series.timeseries?.timestamps || [];
-  const values = series.timeseries?.doubleValues || series.timeseries?.int64Values || [];
-  const points = ts.map((t,i)=>({t:Number(t),v:Number(values[i])})).filter(p=>Number.isFinite(p.v)&&p.t>=startMs&&p.t<=endMs).sort((a,b)=>a.t-b.t);
-  let bytes = 0;
-  for (let i=1;i<points.length;i++) {
-    const seconds=(points[i].t-points[i-1].t)/1000;
-    // Skip long gaps: interpolating across missing data would overstate usage.
-    if (seconds > 15*60 || seconds <= 0) continue;
-    bytes += ((Math.max(0,points[i-1].v)+Math.max(0,points[i].v))/2)*seconds;
-  }
-  return bytes;
+function metricPoints(series,startMs,endMs) {
+  const timestamps=series.timeseries?.timestamps||[],values=series.timeseries?.doubleValues||series.timeseries?.int64Values||[];
+  return timestamps.map((t,i)=>({t:Number(t),v:Number(values[i])})).filter(p=>Number.isFinite(p.v)&&p.t>=startMs&&p.t<=endMs).sort((a,b)=>a.t-b.t);
 }
 
-async function readFolderTraffic(account, folderId, startDate, resources) {
-  const startMs=Date.parse(`${startDate}T00:00:00Z`), endMs=Date.now();
-  const periodMs=Math.max(1,endMs-startMs);
-  const gridInterval=Math.max(15*60*1000,Math.ceil(periodMs/8000/60000)*60000);
-  const query = '"edge.bytes_sent"{resource="*"}';
+function integratePoints(points,baseline,maxGapMs) {
+  let previous=baseline,bytes=0;
+  for(const point of points){
+    if(previous){const seconds=(point.t-previous.t)/1000;if(seconds>0&&seconds*1000<=maxGapMs)bytes+=((Math.max(0,previous.v)+Math.max(0,point.v))/2)*seconds;}
+    previous=point;
+  }
+  return {bytes,lastPoint:points.at(-1)||baseline||null};
+}
+
+async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInterval) {
   const result = await ycFetch(account, `https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`, {
     method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({
-      query, fromTime:new Date(startMs).toISOString(), toTime:new Date(endMs).toISOString(),
+      query:'name="edge.bytes_sent|origin.bytes_fetched"{service="yccdn",resource="*"}', fromTime:new Date(fromMs).toISOString(), toTime:new Date(endMs).toISOString(),
       downsampling:{gridInterval:String(gridInterval),gridAggregation:'AVG',gapFilling:'NULL'}
     })
   });
-  const byResource = new Map();
-  for (const series of result.metrics || []) {
-    const id=series.labels?.resource;
-    if (id) byResource.set(id,(byResource.get(id)||0)+integrateSeries(series,startMs,endMs));
+  const grouped=new Map();
+  for(const series of result.metrics||[]){
+    const id=series.labels?.resource,metric=series.name||series.labels?.name;if(!id||!['edge.bytes_sent','origin.bytes_fetched'].includes(metric))continue;
+    let byMetric=grouped.get(id);if(!byMetric){byMetric=new Map();grouped.set(id,byMetric);}
+    let times=byMetric.get(metric);if(!times){times=new Map();byMetric.set(metric,times);}
+    for(const point of metricPoints(series,fromMs,endMs))times.set(point.t,(times.get(point.t)||0)+point.v);
   }
-  return resources.map(resource=>({...resource,trafficBytes:byResource.get(resource.id)||0}));
+  const maxGapMs=Math.max(10*60*1000,gridInterval*2);
+  return resources.map(resource=>({id:resource.id,metrics:Object.fromEntries(['edge.bytes_sent','origin.bytes_fetched'].map(metric=>[metric,[...((grouped.get(resource.id)||new Map()).get(metric)||new Map())].map(([t,v])=>({t,v})).sort((a,b)=>a.t-b.t)])),maxGapMs}));
 }
 
+/* Usage is accumulated in the cache so historical traffic remains available
+   after Monitoring's rolling history window moves past the grant start. */
+async function syncFolderTraffic(account,folderId,resources) {
+  snapshot.trafficStates ||= {};
+  const now=Date.now(),grantStart=Date.parse(`${account.grantStartDate}T00:00:00Z`);
+  const states=resources.map(r=>snapshot.trafficStates[`${account.billingAccountId}:${r.id}`]);
+  const needsBackfill=states.some(s=>!s?.initialized);
+  const checked=states.filter(s=>s?.initialized).map(s=>Math.max((s.lastCheckedAt||now)-10*60*1000,(Math.max(s.lastPoints?.['edge.bytes_sent']?.t||0,s.lastPoints?.['origin.bytes_fetched']?.t||0))-3*60*1000));
+  const fromMs=needsBackfill?grantStart:Math.max(grantStart,Math.min(...checked,now-10*60*1000));
+  const periodMs=Math.max(1,now-fromMs),gridInterval=needsBackfill?Math.max(3*60*1000,Math.ceil(periodMs/6000/60000)*60000):3*60*1000;
+  const measurements=await readFolderTraffic(account,folderId,fromMs,now,resources,gridInterval),byId=new Map(measurements.map(m=>[m.id,m]));
+  return resources.map(resource=>{
+    const key=`${account.billingAccountId}:${resource.id}`,state=snapshot.trafficStates[key]||{edgeBytes:0,originBytes:0,initialized:false,lastPoints:{},availableMetrics:{}};
+    state.edgeBytes??=state.totalBytes||0;state.originBytes??=0;state.lastPoints||={};state.availableMetrics||={};
+    if(state.lastPoint&&!state.lastPoints['edge.bytes_sent'])state.lastPoints['edge.bytes_sent']=state.lastPoint;
+    const measured=byId.get(resource.id);
+    for(const metric of ['edge.bytes_sent','origin.bytes_fetched']){const points=measured?.metrics?.[metric]||[],baseline=state.lastPoints[metric]||null;if(points.length){const added=integratePoints(points.filter(p=>!baseline||p.t>baseline.t),baseline,measured.maxGapMs);state[metric==='edge.bytes_sent'?'edgeBytes':'originBytes']+=added.bytes;state.lastPoints[metric]=added.lastPoint;state.availableMetrics[metric]=true;}}
+    state.totalBytes=state.edgeBytes+state.originBytes;state.available=Object.values(state.availableMetrics).some(Boolean);
+    state.initialized=true;state.lastCheckedAt=now;snapshot.trafficStates[key]=state;
+    return {...resource,trafficBytes:state.totalBytes,edgeBytes:state.edgeBytes,originBytes:state.originBytes,trafficAvailable:state.available};
+  });
+}
 function grpcJson(args, body) {
   return new Promise((resolve,reject)=>{
     const child=spawn('grpcurl',args,{stdio:['ignore','pipe','pipe']});
@@ -165,13 +186,14 @@ async function syncCdn(account, current) {
   const all=[];
   for (const folder of account.folders || []) {
     const resources=await listCdnResources(account,folder.folderId);
-    const folderItems=resources.map(r=>({id:r.id,name:r.cname||r.id,folderId:folder.folderId,active:r.active!==false,trafficBytes:current.cdnResources.find(old=>old.id===r.id)?.trafficBytes||0}));
+    const folderItems=resources.map(r=>{const old=current.cdnResources.find(item=>item.id===r.id);return {id:r.id,name:r.cname||r.id,folderId:folder.folderId,active:r.active!==false,trafficBytes:old?.trafficBytes||0,edgeBytes:old?.edgeBytes||0,originBytes:old?.originBytes||0,trafficAvailable:old?.trafficAvailable||false};});
     all.push(...folderItems);
     current.cdnResources=[...all];
     try {
-      const withTraffic=await readFolderTraffic(account,folder.folderId,account.grantStartDate,resources);
-      const trafficById=new Map(withTraffic.map(r=>[r.id,r.trafficBytes||0]));
-      for (const item of folderItems) item.trafficBytes=trafficById.get(item.id)||0;
+      if(!folderItems.length)continue;
+      const withTraffic=await syncFolderTraffic(account,folder.folderId,folderItems);
+      const byId=new Map(withTraffic.map(r=>[r.id,r]));
+      for(const item of folderItems){const measured=byId.get(item.id);item.trafficBytes=measured.trafficBytes;item.edgeBytes=measured.edgeBytes;item.originBytes=measured.originBytes;item.trafficAvailable=measured.trafficAvailable;}
     } catch(error) { current.metricError=error.message; }
   }
   current.cdnResources=all;
@@ -281,7 +303,7 @@ const server=http.createServer(async(req,res)=>{
   if (url.pathname==='/healthz') return json(res,200,{ok:true});
   if (!basicAuthOk(req)) { res.writeHead(401,{'www-authenticate':'Basic realm="YC Monitor"','cache-control':'no-store'}); return res.end('Authentication required'); }
   if (url.pathname==='/api/dashboard' && req.method==='GET') {
-    const { _lastBillingRequestAt, _billingCursor, ...publicSnapshot }=snapshot;
+    const { _lastBillingRequestAt, _billingCursor, trafficStates, ...publicSnapshot }=snapshot;
     return json(res,200,{...publicSnapshot,accounts:snapshot.accounts.map(a=>({...a,daysLeft:Math.max(0,a.daysLeft||0),folders:config.accounts.find(c=>c.billingAccountId===a.billingAccountId)?.folders||[]}))});
   }
   if (url.pathname==='/api/refresh' && req.method==='POST') {
@@ -304,7 +326,7 @@ const server=http.createServer(async(req,res)=>{
       await storeKey(account,body.keyJson); config.accounts[index]=account; await persistConfig(); refresh(); return json(res,200,{ok:true});
     } catch(error) { return json(res,400,{error:error.message}); }
   }
-  const publicFiles={'/':'index.html','/index.html':'index.html','/accounts':'index.html','/cdn':'index.html','/styles.css':'styles.css','/app.js':'app.js'};
+  const publicFiles={'/':'index.html','/index.html':'index.html','/accounts':'index.html','/cdn':'index.html','/styles.css':'styles.css','/app.js':'app.js','/logo.svg':'logo.svg','/favicon.svg':'favicon.svg'};
   const file=publicFiles[url.pathname];
   if (file) {
     try { const data=await readFile(path.join(ROOT,file)); res.writeHead(200,{'content-type':MIME[path.extname(file)]||'application/octet-stream','cache-control':'no-store'}); return res.end(data); }

@@ -3,7 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f5f7fb">
+  <meta name="theme-color" content="#f0f1ee">
+  <meta name="description" content="Мониторинг грантов, аккаунтов и трафика Yandex Cloud CDN">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <title>Yandex Cloud · Монитор аккаунтов</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,7 +15,7 @@
 <body>
   <div class="app-shell">
     <aside class="sidebar">
-      <a class="brand" href="/accounts"><span class="brand-mark">yc</span><span>cloud<span class="brand-light">watch</span></span></a>
+      <a class="brand" href="/accounts"><img class="brand-mark" src="/logo.svg" alt=""><span>cloud<span class="brand-light">watch</span></span></a>
       <div class="workspace-label">МОНИТОРИНГ</div>
       <a class="nav-item" id="nav-accounts" href="/accounts"><span class="nav-icon">▦</span> Аккаунты <span class="nav-count" id="nav-count">—</span></a>
       <a class="nav-item" id="nav-cdn" href="/cdn"><span class="nav-icon">◉</span> CDN-ресурсы</a>
@@ -45,6 +47,7 @@
     </main>
   </div>
   <dialog id="account-dialog" class="account-dialog"><form id="account-form"><div class="dialog-heading"><div><h2 id="dialog-title">Добавить аккаунт</h2><p>Ключ хранится на сервере и не показывается в интерфейсе.</p></div><button type="button" class="dialog-close" id="dialog-close" aria-label="Закрыть">×</button></div><label>Название аккаунта<input name="name" required placeholder="Например, cloud-boreas-209"></label><label>Billing account ID<input name="billingAccountId" required placeholder="dn2ffiykwxqiedmeeqy7"></label><label>Дата начала гранта<input name="grantStartDate" required type="date"><small>Грант: 4 000 ₽ на 60 дней с этой даты.</small></label><label>Cloud ID и Folder ID<textarea name="folders" required rows="3" placeholder="Вставьте по одной паре на строку: cloud-id,folder-id"></textarea><small>В консоли Yandex Cloud скопируйте ID облака и каталога, разделите запятой. Можно указать несколько каталогов.</small></label><label>JSON-ключ сервисного аккаунта<input name="keyFile" type="file" accept=".json,application/json"><small id="key-hint">Нужен файл ключа сервисного аккаунта (id, service_account_id, private_key).</small></label><div class="form-error" id="form-error"></div><div class="dialog-actions"><button type="button" class="filter-button" id="dialog-cancel">Отмена</button><button type="submit" class="refresh-button">Сохранить аккаунт</button></div></form></dialog>
+  <dialog id="detail-dialog" class="account-dialog detail-dialog"><div class="detail-content"><div class="dialog-heading"><div><div class="eyebrow">АККАУНТ YANDEX CLOUD</div><h2 id="detail-title">Подробности</h2><p id="detail-id"></p></div><button type="button" class="dialog-close" id="detail-close" aria-label="Закрыть">×</button></div><div class="detail-stats" id="detail-stats"></div><h3>CDN-ресурсы</h3><div id="detail-cdn" class="detail-cdn"></div><p id="detail-errors" class="form-error"></p><div class="dialog-actions"><button type="button" class="filter-button" id="detail-dismiss">Закрыть</button><button type="button" class="refresh-button" id="detail-edit">Изменить аккаунт</button></div></div></dialog>
   <script src="app.js"></script>
 </body>
 </html>
