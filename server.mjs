@@ -107,9 +107,9 @@ function integratePoints(points,baseline,maxGapMs) {
 }
 
 async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInterval) {
-  const readMetric=(metric,resourceId='*',mode='quoted')=>ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`,{
+  const readMetric=(metric,resourceName=null)=>ycFetch(account,`https://monitoring.api.cloud.yandex.net/monitoring/v2/data/read?folderId=${encodeURIComponent(folderId)}`,{
     method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({
-      query:mode==='selector'?`{name="${metric}",service="yccdn",resource="${resourceId}"}`:`"${metric}"{service="yccdn",resource="${resourceId}"}`,fromTime:new Date(fromMs).toISOString(),toTime:new Date(endMs).toISOString(),
+      query:`"${metric}"{service="yccdn"${resourceName?`,resource="${resourceName}"`:''}}`,fromTime:new Date(fromMs).toISOString(),toTime:new Date(endMs).toISOString(),
       downsampling:{gridInterval:String(gridInterval),gridAggregation:'AVG',gapFilling:'NULL'}
     })
   });
@@ -118,22 +118,18 @@ async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInt
   const grouped=new Map();
   const diagnostics={};
   const addSeries=(metric,series)=>{
-    const id=series.labels?.resource??series.labels?.resource_id??series.labels?.resourceId;if(!id)return false;
+    const resourceLabel=series.labels?.resource??series.labels?.resource_id??series.labels?.resourceId;if(!resourceLabel)return false;
+    const normalized=String(resourceLabel).replace(/\.$/,'').toLowerCase();const resource=resources.find(item=>item.id===resourceLabel||String(item.name||'').replace(/\.$/,'').toLowerCase()===normalized);if(!resource)return false;const id=resource.id;
     let byMetric=grouped.get(id);if(!byMetric){byMetric=new Map();grouped.set(id,byMetric);}
     let times=byMetric.get(metric);if(!times){times=new Map();byMetric.set(metric,times);}
     for(const point of metricPoints(series,fromMs,endMs))times.set(point.t,(times.get(point.t)||0)+point.v);
     return true;
   };
   for(const {metric,result} of results){const series=result.metrics||[];diagnostics[metric]={series:series.length,points:0,labels:series[0]?Object.keys(series[0].labels||{}):[]};for(const item of series){addSeries(metric,item);diagnostics[metric].points+=metricPoints(item,fromMs,endMs).length;}}
-  if(Object.values(diagnostics).every(item=>item.series===0)){
-    const selectors=await Promise.all(metricNames.map(async metric=>{try{return {metric,result:await readMetric(metric,'*','selector')}}catch(error){return {metric,error}}}));
-    for(const item of selectors){if(item.error){diagnostics[item.metric].selectorError=item.error.message;continue;}const series=item.result.metrics||[];diagnostics[item.metric].selectorSeries=series.length;for(const entry of series)addSeries(item.metric,entry);}
-  }
-  // A wildcard query can return series with different label encodings. Retry by exact resource ID
-  // so one missing label mapping cannot silently turn real CDN usage into 0 B.
+  // Retry by the resource label from Monitoring (the CDN CNAME), not the CDN API resource ID.
   const missing=[];
   for(const resource of resources)for(const metric of metricNames){const points=(grouped.get(resource.id)?.get(metric)?.size||0);if(!points)missing.push({resource,metric});}
-  const fallback=await Promise.all(missing.map(async ({resource,metric})=>{try{let result=await readMetric(metric,resource.id,'selector');if(!(result.metrics||[]).length)result=await readMetric(metric,resource.id);return {resource,metric,result};}catch(error){return {resource,metric,error};}}));
+  const fallback=await Promise.all(missing.map(async ({resource,metric})=>{try{return {resource,metric,result:await readMetric(metric,resource.name||resource.id)};}catch(error){return {resource,metric,error};}}));
   const fallbackErrors=[];
   for(const item of fallback){if(item.error){fallbackErrors.push(`${item.resource.name}: ${item.metric}: ${item.error.message}`);continue;}for(const series of item.result.metrics||[]){if(!addSeries(item.metric,series))addSeries(item.metric,{...series,labels:{...(series.labels||{}),resource:item.resource.id}});}}
   for(const metric of metricNames){const resourceSeries=new Set();let points=0;for(const resource of resources){const series=grouped.get(resource.id)?.get(metric);if(series?.size){resourceSeries.add(resource.id);points+=series.size;}}diagnostics[metric].matchedResources=resourceSeries.size;diagnostics[metric].matchedPoints=points;}
@@ -154,7 +150,7 @@ async function readFolderTraffic(account,folderId,fromMs,endMs,resources,gridInt
 async function syncFolderTraffic(account,folderId,resources) {
   snapshot.trafficStates ||= {};
   const now=Date.now(),grantStart=Date.parse(`${account.grantStartDate}T00:00:00Z`);
-  for(const resource of resources){const state=snapshot.trafficStates[`${account.billingAccountId}:${resource.id}`];if(state?.totalBytes===0&&!state.lastPoints?.['edge.bytes_sent']&&!state.lastPoints?.['origin.bytes_fetched']&&now-(state.noDataBackfillAt||0)>=15*60*1000){state.initialized=false;state.availableMetrics={};state.noDataBackfillAt=now;}}
+  for(const resource of resources){const state=snapshot.trafficStates[`${account.billingAccountId}:${resource.id}`];if(state&&state.measurementVersion!==2){state.initialized=false;state.availableMetrics={};state.measurementVersion=2;state.noDataBackfillAt=0;}if(state?.totalBytes===0&&!state.lastPoints?.['edge.bytes_sent']&&!state.lastPoints?.['origin.bytes_fetched']&&now-(state.noDataBackfillAt||0)>=15*60*1000){state.initialized=false;state.availableMetrics={};state.noDataBackfillAt=now;}}
   const states=resources.map(r=>snapshot.trafficStates[`${account.billingAccountId}:${r.id}`]);
   const needsBackfill=states.some(s=>!s?.initialized);
   const checked=states.filter(s=>s?.initialized).map(s=>Math.max((s.lastCheckedAt||now)-10*60*1000,(Math.max(s.lastPoints?.['edge.bytes_sent']?.t||0,s.lastPoints?.['origin.bytes_fetched']?.t||0))-3*60*1000));
@@ -164,6 +160,7 @@ async function syncFolderTraffic(account,folderId,resources) {
   const synced=resources.map(resource=>{
     const key=`${account.billingAccountId}:${resource.id}`,state=snapshot.trafficStates[key]||{edgeBytes:0,originBytes:0,initialized:false,lastPoints:{},availableMetrics:{}};
     state.edgeBytes??=state.totalBytes||0;state.originBytes??=0;state.lastPoints||={};state.availableMetrics||={};
+    state.measurementVersion=2;
     if(state.lastPoint&&!state.lastPoints['edge.bytes_sent'])state.lastPoints['edge.bytes_sent']=state.lastPoint;
     const measured=byId.get(resource.id);
     for(const metric of ['edge.bytes_sent','origin.bytes_fetched']){const points=measured?.metrics?.[metric]||[],baseline=state.lastPoints[metric]||null;if(points.length){const added=integratePoints(points.filter(p=>!baseline||p.t>baseline.t),baseline,measured.maxGapMs);state[metric==='edge.bytes_sent'?'edgeBytes':'originBytes']+=added.bytes;state.lastPoints[metric]=added.lastPoint;}if(measured?.metricAvailable?.[metric])state.availableMetrics[metric]=true;}
